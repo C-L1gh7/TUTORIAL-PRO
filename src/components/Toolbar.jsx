@@ -1,5 +1,5 @@
 import React from 'react';
-import { MousePointer2, Square, ArrowRight, Scan, Scissors, Type, Undo2, Trash2, Check, Download, LayoutGrid } from 'lucide-react';
+import { MousePointer2, Square, ArrowRight, Scan, Scissors, Type, Undo2, Trash2, Check, X, Download, LayoutGrid } from 'lucide-react';
 import { TOOLS, COLORS, BRUSH_SIZES, TOOL_DETAILS } from '../constants';
 
 export default function Toolbar({
@@ -11,6 +11,7 @@ export default function Toolbar({
     handleClear,
     handleExport,
     applyCrop,
+    cancelCrop,
     tempRect,
     activeImgIndex
 }) {
@@ -116,9 +117,17 @@ export default function Toolbar({
 
             <div className="flex items-center space-x-3">
                 {activeTool === TOOLS.CROP && tempRect && (
-                    <button onClick={applyCrop} className="flex items-center px-4 py-2 bg-green-600 hover:bg-green-500 rounded-lg text-xs font-bold transition-all shadow-lg active:scale-95 text-white">
-                        <Check size={14} className="mr-2" /> 确认裁切
-                    </button>
+                    <>
+                        <button onClick={cancelCrop} className="flex items-center px-4 py-2 bg-zinc-700 hover:bg-zinc-600 rounded-lg text-xs font-bold transition-all shadow-lg active:scale-95 text-white">
+                            <X size={14} className="mr-2" /> 取消
+                        </button>
+                        <button onClick={applyCrop} className="flex items-center px-4 py-2 bg-green-600 hover:bg-green-500 rounded-lg text-xs font-bold transition-all shadow-lg active:scale-95 text-white">
+                            <Check size={14} className="mr-2" /> 确认裁切
+                        </button>
+                    </>
+                )}
+                {activeTool === TOOLS.SPOTLIGHT && tempRect && (
+                    <span className="text-xs text-zinc-500">拖拽创建聚光灯，松手即应用</span>
                 )}
                 <button
                     onClick={handleExport}

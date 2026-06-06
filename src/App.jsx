@@ -30,10 +30,11 @@ const App = () => {
 
     // Refs
     const canvasRef = useRef(null);
-    const cursorRef = useRef(null); // Kept to avoid breaking if used, though logic removed
     const startPos = useRef({ x: 0, y: 0 });
     const imgCache = useRef(new Map());
     const textAreaRef = useRef(null);
+    const renderGen = useRef(0);      // Render generation counter to cancel stale async renders
+    const mountedRef = useRef(true);  // Track mount state
 
     // Helper: Load Image
     const getCachedImage = (src) => {
@@ -140,11 +141,20 @@ const App = () => {
         if (activeImgIndex === -1 || !images[activeImgIndex]) return;
         const canvas = canvasRef.current;
         if (!canvas) return;
+
+        // Increment generation counter so any stale in-flight render can bail out
+        renderGen.current += 1;
+        const myGen = renderGen.current;
+
         const ctx = canvas.getContext('2d');
         const imgData = images[activeImgIndex];
 
         try {
             const img = await getCachedImage(imgData.src);
+
+            // Bail if a newer render has started or component unmounted
+            if (renderGen.current !== myGen || !mountedRef.current) return;
+
             // Verify canvas size matches image
             if (canvas.width !== img.width || canvas.height !== img.height) {
                 canvas.width = img.width;
@@ -246,66 +256,17 @@ const App = () => {
         }
     }, [activeImgIndex, images]);
 
-    // Shortcuts Handler
+    // Mount/unmount tracking
     useEffect(() => {
-        const handleKeyDown = (e) => {
-            // Ignore if user is typing in an input or textarea
-            if (['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
-
-            // Check if any tool shortcut matches
-            Object.keys(TOOL_DETAILS).forEach(toolKey => {
-                const detail = TOOL_DETAILS[toolKey];
-                if (e.key.toLowerCase() === detail.shortcut.toLowerCase()) {
-                    setActiveTool(toolKey);
-                }
-            });
-        };
-
-        window.addEventListener('keydown', handleKeyDown);
-        return () => window.removeEventListener('keydown', handleKeyDown);
+        mountedRef.current = true;
+        return () => { mountedRef.current = false; };
     }, []);
-
-    // Paste Handler
-    useEffect(() => {
-        const handlePaste = (e) => {
-            if (textInput) return; // Don't paste image if typing
-            const items = e.clipboardData?.items;
-            if (!items) return;
-            for (let i = 0; i < items.length; i++) {
-                if (items[i].type.indexOf('image') !== -1) {
-                    const blob = items[i].getAsFile();
-                    const reader = new FileReader();
-                    reader.onload = (event) => handleImageImport(event.target.result);
-                    reader.readAsDataURL(blob);
-                }
-            }
-        };
-
-        window.addEventListener('paste', handlePaste);
-        return () => window.removeEventListener('paste', handlePaste);
-    }, [textInput]);
-
-    const handleImageImport = (src) => {
-        const newImg = {
-            id: Date.now(),
-            src,
-            shapes: [],
-            spotlights: [],
-            history: [{ shapes: [], spotlights: [], src }],
-            historyIndex: 0
-        };
-        setImages(prev => {
-            const next = [...prev, newImg];
-            setActiveImgIndex(next.length - 1);
-            return next;
-        });
-    };
 
     // History & State Update Logic
     const updateImageState = (newShapes, newSpotlights, newSrc = null) => {
         if (activeImgIndex === -1) return;
         const imgData = images[activeImgIndex];
-        
+
         // Calculate new history
         // Normalize history for spotlights array
         const currentHistory = (imgData.history || []).map(h => ({
@@ -318,7 +279,7 @@ const App = () => {
         }
 
         let currentIndex = imgData.historyIndex || 0;
-        
+
         const historySlice = currentHistory.slice(0, currentIndex + 1);
         const newState = {
             shapes: newShapes,
@@ -333,16 +294,16 @@ const App = () => {
         setSpotlights(newSpotlights);
 
         // Update Images State
-        setImages(prev => prev.map((img, i) => 
-            i === activeImgIndex 
-                ? { 
-                    ...img, 
-                    shapes: newShapes, 
-                    spotlights: newSpotlights, 
+        setImages(prev => prev.map((img, i) =>
+            i === activeImgIndex
+                ? {
+                    ...img,
+                    shapes: newShapes,
+                    spotlights: newSpotlights,
                     src: newSrc || img.src,
                     history: newHistory,
                     historyIndex: newIndex
-                  } 
+                  }
                 : img
         ));
     };
@@ -376,6 +337,85 @@ const App = () => {
 
     const canUndo = activeImgIndex !== -1 && images[activeImgIndex] && (images[activeImgIndex].historyIndex || 0) > 0;
 
+    // Shortcuts Handler
+    useEffect(() => {
+        const handleKeyDown = (e) => {
+            // Ignore if user is typing in an input or textarea
+            if (['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
+
+            // Ctrl+Z: Undo
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+                e.preventDefault();
+                handleUndo();
+                return;
+            }
+
+            // Escape: Cancel crop / dismiss text input
+            if (e.key === 'Escape') {
+                if (textInput) {
+                    setTextInput(null);
+                    return;
+                }
+                if (tempRect && (activeTool === TOOLS.CROP || activeTool === TOOLS.SPOTLIGHT)) {
+                    setTempRect(null);
+                    return;
+                }
+                return;
+            }
+
+            // Tool shortcuts — only when NO modifier key is held
+            if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+            Object.keys(TOOL_DETAILS).forEach(toolKey => {
+                const detail = TOOL_DETAILS[toolKey];
+                if (e.key.toLowerCase() === detail.shortcut.toLowerCase()) {
+                    e.preventDefault();
+                    setActiveTool(toolKey);
+                    setTempRect(null);
+                }
+            });
+        };
+
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [textInput, tempRect, activeTool, handleUndo]);
+
+    // Paste Handler
+    useEffect(() => {
+        const handleImageImport = (src) => {
+            const newImg = {
+                id: Date.now(),
+                src,
+                shapes: [],
+                spotlights: [],
+                history: [{ shapes: [], spotlights: [], src }],
+                historyIndex: 0
+            };
+            setImages(prev => {
+                const next = [...prev, newImg];
+                setActiveImgIndex(next.length - 1);
+                return next;
+            });
+        };
+
+        const handlePaste = (e) => {
+            if (textInput) return; // Don't paste image if typing
+            const items = e.clipboardData?.items;
+            if (!items) return;
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].type.indexOf('image') !== -1) {
+                    const blob = items[i].getAsFile();
+                    const reader = new FileReader();
+                    reader.onload = (event) => handleImageImport(event.target.result);
+                    reader.readAsDataURL(blob);
+                }
+            }
+        };
+
+        window.addEventListener('paste', handlePaste);
+        return () => window.removeEventListener('paste', handlePaste);
+    }, [textInput]);
+
     // Mouse Event Handlers
     const getPos = (e) => {
         const rect = canvasRef.current.getBoundingClientRect();
@@ -386,16 +426,15 @@ const App = () => {
 
     const handleMouseDown = (e) => {
         if (activeImgIndex === -1) return;
-        
+
         // If text input is active, force commit and return.
-        // This ensures the current text is saved before any new action starts.
         if (textInput) {
             handleTextComplete();
             return;
         }
 
         const pos = getPos(e);
-        
+
         if (activeTool === TOOLS.TEXT) {
             setTextInput({ x: pos.x, y: pos.y, text: '' });
             setTimeout(() => {
@@ -404,9 +443,12 @@ const App = () => {
             return;
         }
 
+        // SELECT tool: no drawing behavior
+        if (activeTool === TOOLS.SELECT) return;
+
         setIsDrawing(true);
         startPos.current = pos;
-        
+
         if (activeTool === TOOLS.MOSAIC) {
             setCurrentPath([pos]);
         }
@@ -445,7 +487,7 @@ const App = () => {
 
         if (!tempRect) return;
 
-        // Normalize
+        // Normalize negative width/height
         let { x, y, w, h } = tempRect;
         if (w < 0) { x += w; w = Math.abs(w); }
         if (h < 0) { y += h; h = Math.abs(h); }
@@ -454,10 +496,11 @@ const App = () => {
         if (activeTool === TOOLS.RECT || activeTool === TOOLS.ARROW) {
             const newShapes = [...shapes, { ...normalizedRect, type: activeTool, color: strokeColor }];
             updateImageState(newShapes, spotlights);
-            setTempRect(null);
         } else if (activeTool === TOOLS.SPOTLIGHT) {
-            // Append new spotlight instead of replacing
             updateImageState(shapes, [...spotlights, { x, y, w, h }]);
+        }
+        // CROP leaves tempRect for the confirm button; other tools clean up
+        if (activeTool !== TOOLS.CROP) {
             setTempRect(null);
         }
     };
@@ -485,6 +528,11 @@ const App = () => {
         imgCache.current.delete(images[activeImgIndex].src); 
 
         updateImageState([], [], newSrc);
+        setTempRect(null);
+        setActiveTool(TOOLS.SELECT);
+    };
+
+    const cancelCrop = () => {
         setTempRect(null);
         setActiveTool(TOOLS.SELECT);
     };
@@ -560,6 +608,7 @@ const App = () => {
                     handleClear={handleClear}
                     handleExport={handleExport}
                     applyCrop={applyCrop}
+                    cancelCrop={cancelCrop}
                     tempRect={tempRect}
                     activeImgIndex={activeImgIndex}
                 />
@@ -594,12 +643,13 @@ const App = () => {
                                             if (e.key === 'Escape') setTextInput(null);
                                         }}
                                         className="bg-transparent border border-blue-500 text-white p-1 outline-none resize-none overflow-hidden"
-                                        style={{ 
-                                            color: strokeColor, 
-                                            fontSize: '24px', 
-                                            fontWeight: 'bold', 
-                                            minWidth: '100px', 
-                                            minHeight: '40px' 
+                                        style={{
+                                            color: strokeColor,
+                                            fontSize: '24px',
+                                            fontWeight: 'bold',
+                                            fontFamily: 'sans-serif',
+                                            minWidth: '100px',
+                                            minHeight: '40px'
                                         }}
                                         placeholder="Type here..."
                                         autoFocus
@@ -608,13 +658,14 @@ const App = () => {
                             )}
                         </div>
                     ) : (
-                        <div className="text-center">
-                            <div className="w-20 h-20 bg-zinc-900 rounded-3xl flex items-center justify-center mx-auto mb-6 border border-zinc-800 shadow-xl">
-                                <Lightbulb size={40} className="text-zinc-700 animate-pulse" />
+                        <div className="text-center px-4">
+                            <div className="w-24 h-24 bg-gradient-to-br from-blue-500/10 to-purple-500/10 rounded-3xl flex items-center justify-center mx-auto mb-8 border border-blue-500/20 shadow-2xl">
+                                <Lightbulb size={48} className="text-blue-400 animate-pulse" />
                             </div>
-                            <h2 className="text-xl font-bold text-zinc-400 mb-2">准备好开始了吗？</h2>
-                            <p className="text-zinc-600 text-sm">按 Ctrl + V 粘贴截图</p>
-                            <p className="text-zinc-700 text-xs mt-2">当前项目: {projectName}</p>
+                            <h2 className="text-2xl font-bold text-white mb-3">准备好开始了吗？</h2>
+                            <p className="text-zinc-500 text-base mb-1">按 <kbd className="px-2 py-0.5 bg-zinc-800 border border-zinc-700 rounded text-zinc-300 text-sm font-mono">Ctrl + V</kbd> 粘贴截图</p>
+                            <p className="text-zinc-600 text-sm mt-4">也可以从工具栏选择工具开始标注</p>
+                            <p className="text-zinc-700 text-xs mt-6">项目: <span className="text-zinc-500">{projectName}</span></p>
                         </div>
                     )}
                 </section>
